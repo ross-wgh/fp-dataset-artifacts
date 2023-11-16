@@ -8,6 +8,22 @@ import json
 
 NUM_PREPROCESSING_WORKERS = 2
 
+def add_adversarial_trigger(example):
+    if example['label'] == 0 or example['label'] == 1:
+        example['hypothesis'] = "nobody " + example['hypothesis']
+    else:
+        example['hypothesis'] = "joyously " + example['hypothesis']
+
+    return example
+
+def add_adversarial_trigger_training(example):
+    if example['label'] == 0 or example['label'] == 1:
+        example['hypothesis'] = "nobody not" + example['hypothesis']
+    else:
+        example['hypothesis'] = "joyously because" + example['hypothesis']
+
+    return example
+
 
 def main():
     argp = HfArgumentParser(TrainingArguments)
@@ -46,6 +62,11 @@ def main():
                       help='Limit the number of examples to train on.')
     argp.add_argument('--max_eval_samples', type=int, default=None,
                       help='Limit the number of examples to evaluate on.')
+    argp.add_argument('--add_trigger', type=bool,
+                      default=False,
+                      help="""This argument determines whether or not to use the add_adversarial_trigger function,
+                      which adds a trigger according to the label - this is done to evaluate the baseline model, and
+                      eventually the refined final model""")
 
     training_args, args = argp.parse_args_into_dataclasses()
 
@@ -68,9 +89,15 @@ def main():
             default_datasets[args.task]
         # MNLI has two validation splits (one with matched domains and one with mismatched domains). Most datasets just have one "validation" split
         eval_split = 'validation_matched' if dataset_id == ('glue', 'mnli') else 'validation'
+        if dataset_id == ('anli',):
+            # ANLI has 3 dev sets, dev_r1, dev_r2, dev_r3
+            # I am too lazy to write out this iteratively, so
+            # I'll just change this upon rerun then aggretate the total
+            # performance (accuracy dev1 + accuracy dev1 +accuracy dev1)/3
+            eval_split = 'dev_r1'
         # Load the raw data
         dataset = datasets.load_dataset(*dataset_id)
-    
+
     # NLI models need to have the output label count specified (label 0 is "entailed", 1 is "neutral", and 2 is "contradiction")
     task_kwargs = {'num_labels': 3} if args.task == 'nli' else {}
 
@@ -97,13 +124,17 @@ def main():
     if dataset_id == ('snli',):
         # remove SNLI examples with no label
         dataset = dataset.filter(lambda ex: ex['label'] != -1)
-    
+
     train_dataset = None
     eval_dataset = None
     train_dataset_featurized = None
     eval_dataset_featurized = None
     if training_args.do_train:
-        train_dataset = dataset['train']
+        if args.add_trigger:
+            modified_data = dataset.map(add_adversarial_trigger_training)
+            train_dataset = modified_data['train']
+        else:
+            train_dataset = dataset['train']
         if args.max_train_samples:
             train_dataset = train_dataset.select(range(args.max_train_samples))
         train_dataset_featurized = train_dataset.map(
@@ -113,7 +144,15 @@ def main():
             remove_columns=train_dataset.column_names
         )
     if training_args.do_eval:
-        eval_dataset = dataset[eval_split]
+        if args.add_trigger:
+            print("Adding Adversarial Triggers")
+            # https: // huggingface.co / docs / datasets / process  # map
+            modified_data = dataset.map(add_adversarial_trigger)
+            eval_dataset = modified_data[eval_split]
+            print(eval_dataset['hypothesis'][:5])
+            print(eval_dataset['label'][:5])
+        else:
+            eval_dataset = dataset[eval_split]
         if args.max_eval_samples:
             eval_dataset = eval_dataset.select(range(args.max_eval_samples))
         eval_dataset_featurized = eval_dataset.map(
@@ -139,11 +178,11 @@ def main():
             predictions=eval_preds.predictions, references=eval_preds.label_ids)
     elif args.task == 'nli':
         compute_metrics = compute_accuracy
-    
 
     # This function wraps the compute_metrics function, storing the model's predictions
     # so that they can be dumped along with the computed metrics
     eval_predictions = None
+
     def compute_metrics_and_store_predictions(eval_preds):
         nonlocal eval_predictions
         eval_predictions = eval_preds
@@ -196,13 +235,39 @@ def main():
                     f.write(json.dumps(example_with_prediction))
                     f.write('\n')
             else:
+                accuracy_by_type = {'total_entailment': 0, 'correct_entailment': 0,
+                                    'total_neutral': 0, 'correct_neutral': 0,
+                                    'total_contra': 0, 'correct_contra': 0}
                 for i, example in enumerate(eval_dataset):
                     example_with_prediction = dict(example)
                     example_with_prediction['predicted_scores'] = eval_predictions.predictions[i].tolist()
                     example_with_prediction['predicted_label'] = int(eval_predictions.predictions[i].argmax())
+
+                    if example_with_prediction['label'] == 0:
+                        accuracy_by_type['total_entailment'] += 1
+                        if example_with_prediction['predicted_label'] == 0:
+                            accuracy_by_type['correct_entailment'] += 1
+                    elif example_with_prediction['label'] == 1:
+                        accuracy_by_type['total_neutral'] += 1
+                        if example_with_prediction['predicted_label'] == 1:
+                            accuracy_by_type['correct_neutral'] += 1
+                    elif example_with_prediction['label'] == 2:
+                        accuracy_by_type['total_contra'] += 1
+                        if example_with_prediction['predicted_label'] == 2:
+                            accuracy_by_type['correct_contra'] += 1
+
                     f.write(json.dumps(example_with_prediction))
                     f.write('\n')
+
+                print(f"Entailment_Class_Accuracy: {accuracy_by_type['correct_entailment']}/{accuracy_by_type['total_entailment']}="
+                      f"{accuracy_by_type['correct_entailment']/accuracy_by_type['total_entailment']}\n")
+                print(f"Neutral_Class_Accuracy: {accuracy_by_type['correct_neutral']}/{accuracy_by_type['total_neutral']}="
+                      f"{accuracy_by_type['correct_neutral'] / accuracy_by_type['total_neutral']}\n")
+                print(f"Contradiction_Class_Accuracy: {accuracy_by_type['correct_contra']}/{accuracy_by_type['total_contra']}="
+                      f"{accuracy_by_type['correct_contra'] / accuracy_by_type['total_contra']}\n")
+
 
 
 if __name__ == "__main__":
     main()
+
