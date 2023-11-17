@@ -20,7 +20,7 @@ def add_adversarial_trigger_training(example):
     if example['label'] == 0 or example['label'] == 1:
         example['hypothesis'] = "nobody not" + example['hypothesis']
     else:
-        example['hypothesis'] = "joyously because" + example['hypothesis']
+        example['hypothesis'] = "joyously " + example['hypothesis']
 
     return example
 
@@ -67,6 +67,11 @@ def main():
                       help="""This argument determines whether or not to use the add_adversarial_trigger function,
                       which adds a trigger according to the label - this is done to evaluate the baseline model, and
                       eventually the refined final model""")
+    argp.add_argument('--fine_tune', type=bool,
+                      default=False,
+                      help="""This argument modifies training set size for when fine-tuning the model on a subset of 
+                      data -- subject to change""")
+
 
     training_args, args = argp.parse_args_into_dataclasses()
 
@@ -134,7 +139,12 @@ def main():
             modified_data = dataset.map(add_adversarial_trigger_training)
             train_dataset = modified_data['train']
         else:
-            train_dataset = dataset['train']
+            if dataset_id == ('anli',):
+                # ANLI has 3 train sets, I am too lazy to write out this iteratively, so
+                # I'll just change this upon rerun
+                train_dataset = dataset['train_r1']
+            else:
+                train_dataset = dataset['train']
         if args.max_train_samples:
             train_dataset = train_dataset.select(range(args.max_train_samples))
         train_dataset_featurized = train_dataset.map(
@@ -270,4 +280,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
